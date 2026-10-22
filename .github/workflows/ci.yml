@@ -1,4 +1,3 @@
-
 name: CI - Docker, GHCR y Docker Hub
 
 on:
