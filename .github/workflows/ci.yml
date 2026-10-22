@@ -1,3 +1,4 @@
+
 name: CI - Docker, GHCR y Docker Hub
 
 on:
@@ -5,112 +6,90 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# El GITHUB_TOKEN solo necesita leer el código y escribir paquetes en GHCR.
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build-verify-publish:
-    name: Construir, verificar y publicar
+  build-and-push:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Obtener el código
+      - name: Obtener codigo
         uses: actions/checkout@v4
 
-      - name: Calcular nombres de imagen y tag
-        id: meta
+      - name: Definir nombres de imagen
+        id: image
+        shell: bash
+        run: |
+          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "hub=${DOCKERHUB_USERNAME,,}/${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
         env:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
-        run: |
-          if [ -z "$DOCKERHUB_USERNAME" ]; then
-            echo "::error::Falta la variable DOCKERHUB_USERNAME (Settings > Secrets and variables > Actions > Variables)."
-            exit 1
-          fi
 
-          # Los registros exigen nombres en minúsculas; el tag del commit es el SHA corto (7 caracteres).
-          GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          DOCKERHUB_IMAGE="${DOCKERHUB_USERNAME,,}/dds-devops"
-          TAG="${GITHUB_SHA::7}"
-
-          echo "ghcr=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "dockerhub=${DOCKERHUB_IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "GHCR:       ${GHCR_IMAGE}:${TAG} y :latest"
-          echo "Docker Hub: ${DOCKERHUB_IMAGE}:${TAG} y :latest"
-
-      # Se construye UNA sola vez y se le asignan las 4 etiquetas (2 por registro).
       - name: Construir imagen Docker
         run: |
-          docker build \
-            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            -t "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}" \
-            -t "${{ steps.meta.outputs.ghcr }}:latest" \
-            -t "${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}" \
-            -t "${{ steps.meta.outputs.dockerhub }}:latest" \
-            .
+          docker build -t dds-devops-demo:test .
 
-      - name: Verificar la aplicación
+      - name: Verificar funcionamiento
         run: |
-          docker run -d --name app -p 8080:80 "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
+          docker run -d --name web-test \
+            -p 127.0.0.1:8080:80 \
+            dds-devops-demo:test
 
-          # Esperar a que nginx responda (hasta 15 segundos).
           for i in $(seq 1 15); do
-            curl -fs http://localhost:8080 > /dev/null && break
+            if curl -fsS http://127.0.0.1:8080/ | grep -q "Hola DevOps"; then
+              echo "Prueba exitosa"
+              exit 0
+            fi
             sleep 1
           done
 
-          if curl -fs http://localhost:8080 | grep -q "Hola DevOps"; then
-            echo "Verificación correcta: la página contiene 'Hola DevOps'."
-          else
-            echo "Error: la página no contiene 'Hola DevOps'."
-            docker logs app
-            exit 1
-          fi
+          docker logs web-test
+          exit 1
 
-      - name: Detener contenedor de prueba
-        if: always()
-        run: docker rm -f app || true
-
-      - name: Iniciar sesión en GHCR
-        uses: docker/login-action@v3
+      - name: Autenticarse en GHCR
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publicar imagen en GHCR
-        run: |
-          docker push "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
-          docker push "${{ steps.meta.outputs.ghcr }}:latest"
-
-      - name: Iniciar sesión en Docker Hub
-        uses: docker/login-action@v3
+      - name: Autenticarse en Docker Hub
+        uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+ 
+      - name: Etiquetar imagen para ambos registries
+        shell: bash
+        run: |
+          TAG="${GITHUB_SHA::7}"
+
+          docker tag dds-devops-demo:test \
+            "${{ steps.image.outputs.ghcr }}:$TAG"
+
+          docker tag dds-devops-demo:test \
+            "${{ steps.image.outputs.ghcr }}:latest"
+
+          docker tag dds-devops-demo:test \
+            "${{ steps.image.outputs.hub }}:$TAG"
+
+          docker tag dds-devops-demo:test \
+            "${{ steps.image.outputs.hub }}:latest"
+
+      - name: Publicar imagen en GHCR
+        shell: bash
+        run: |
+          TAG="${GITHUB_SHA::7}"
+
+          docker push "${{ steps.image.outputs.ghcr }}:$TAG"
+          docker push "${{ steps.image.outputs.ghcr }}:latest"
 
       - name: Publicar imagen en Docker Hub
+        shell: bash
         run: |
-          docker push "${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}"
-          docker push "${{ steps.meta.outputs.dockerhub }}:latest"
+          TAG="${GITHUB_SHA::7}"
 
-      - name: Resumen
-        run: |
-          {
-            echo "### Imágenes publicadas"
-            echo ""
-            echo "**Docker Hub:** \`${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}\` (también \`:latest\`)"
-            echo ""
-            echo '```'
-            echo "docker run --rm -p 8082:80 ${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}"
-            echo '```'
-            echo ""
-            echo "**GHCR:** \`${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}\` (también \`:latest\`)"
-            echo ""
-            echo '```'
-            echo "docker run --rm -p 8081:80 ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          docker push "${{ steps.image.outputs.hub }}:$TAG"
+          docker push "${{ steps.image.outputs.hub }}:latest"
