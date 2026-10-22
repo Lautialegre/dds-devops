@@ -1,4 +1,4 @@
-name: CI - Docker y GHCR
+name: CI - Docker, GHCR y Docker Hub
 
 on:
   push:
@@ -19,27 +19,42 @@ jobs:
       - name: Obtener el código
         uses: actions/checkout@v4
 
-      - name: Calcular nombre de imagen y tag
+      - name: Calcular nombres de imagen y tag
         id: meta
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
         run: |
-          # GHCR exige el nombre en minúsculas; el tag es el SHA corto (7 caracteres).
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          TAG="${GITHUB_SHA::7}"
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Imagen a publicar: ${IMAGE}:${TAG}"
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "::error::Falta la variable DOCKERHUB_USERNAME (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
 
+          # Los registros exigen nombres en minúsculas; el tag del commit es el SHA corto (7 caracteres).
+          GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          DOCKERHUB_IMAGE="${DOCKERHUB_USERNAME,,}/dds-devops"
+          TAG="${GITHUB_SHA::7}"
+
+          echo "ghcr=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub=${DOCKERHUB_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "GHCR:       ${GHCR_IMAGE}:${TAG} y :latest"
+          echo "Docker Hub: ${DOCKERHUB_IMAGE}:${TAG} y :latest"
+
+      # Se construye UNA sola vez y se le asignan las 4 etiquetas (2 por registro).
       - name: Construir imagen Docker
         run: |
           docker build \
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            -t "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.ghcr }}:latest" \
+            -t "${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.dockerhub }}:latest" \
             .
 
       - name: Verificar la aplicación
         run: |
-          docker run -d --name app -p 8080:80 "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          docker run -d --name app -p 8080:80 "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
 
           # Esperar a que nginx responda (hasta 15 segundos).
           for i in $(seq 1 15); do
@@ -67,14 +82,35 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publicar imagen en GHCR
-        run: docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+        run: |
+          docker push "${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.ghcr }}:latest"
+
+      - name: Iniciar sesión en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publicar imagen en Docker Hub
+        run: |
+          docker push "${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.dockerhub }}:latest"
 
       - name: Resumen
         run: |
           {
-            echo "### Imagen publicada"
+            echo "### Imágenes publicadas"
+            echo ""
+            echo "**Docker Hub:** \`${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}\` (también \`:latest\`)"
             echo ""
             echo '```'
-            echo "docker run --rm -p 8081:80 ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+            echo "docker run --rm -p 8082:80 ${{ steps.meta.outputs.dockerhub }}:${{ steps.meta.outputs.tag }}"
+            echo '```'
+            echo ""
+            echo "**GHCR:** \`${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}\` (también \`:latest\`)"
+            echo ""
+            echo '```'
+            echo "docker run --rm -p 8081:80 ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.tag }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
